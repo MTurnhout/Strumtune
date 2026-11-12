@@ -2,7 +2,9 @@
 
 A browser guitar tuner that reads all strings from one strum and switches to single-string mode by itself when you pluck one string. Supports preset tunings (guitar, extended range, bass, ukulele, mandolin) and custom tunings with per-string cents offsets.
 
-## Run
+**Open it:** https://mturnhout.github.io/Strumtune/ (allow the microphone when the browser asks).
+
+## Run locally
 
 Open `index.html` in Chrome or Edge (keep `dsp.js` next to it) and click **Start microphone**. If the browser refuses the microphone on a local file, serve the folder:
 
