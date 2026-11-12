@@ -4,6 +4,16 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
 <title>Strumtune</title>
+<meta name="description" content="Guitar tuner that reads all strings from one strum and switches to single-string mode automatically.">
+<link rel="manifest" href="manifest.webmanifest">
+<link rel="icon" type="image/png" sizes="32x32" href="icons/icon-32.png">
+<link rel="apple-touch-icon" href="icons/apple-touch-icon.png">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-title" content="Strumtune">
+<meta name="apple-mobile-web-app-status-bar-style" content="default">
+<meta name="theme-color" content="#eef1f4" media="(prefers-color-scheme: light)">
+<meta name="theme-color" content="#0d1013" media="(prefers-color-scheme: dark)">
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
 <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Barlow+Condensed:wght@500;600;700&family=IBM+Plex+Mono:wght@400;500&family=Inter:wght@400;500;600&display=swap">
@@ -46,7 +56,9 @@ body {
   background: var(--bg); color: var(--ink); font: 14px/1.5 var(--font-body);
   padding-left: max(16px, env(safe-area-inset-left, 0px));
   padding-right: max(16px, env(safe-area-inset-right, 0px));
-  padding-block: 18px 40px;
+  /* home screen apps run edge to edge: keep clear of the status bar and home indicator */
+  padding-top: max(18px, env(safe-area-inset-top, 0px));
+  padding-bottom: max(40px, env(safe-area-inset-bottom, 0px));
 }
 .wrap { max-width: 1040px; margin: 0 auto; display: grid; gap: 16px; }
 button, select, input { font: inherit; color: inherit; }
@@ -351,6 +363,7 @@ const E = {
   plan: null, targets: [], cfg: null,
   onsetMode: null, lastDecided: null, mode: null, monoHist: [], silentMs: 0, live: false,
   readings: [], single: null, strumInfo: null, demoTruth: null,
+  ticker: null, wake: null, micStartedAt: 0, lastSoundAt: 0, healthMsg: false, restartOnShow: false,
 };
 
 function configure() {
@@ -390,13 +403,16 @@ const WORKLET = `class StrumtuneTap extends AudioWorkletProcessor {
 }
 registerProcessor('strumtune-tap', StrumtuneTap);`;
 
-async function ensureContext() {
-  if (E.ctx) { if (E.ctx.state === 'suspended') await E.ctx.resume(); return; }
+// Builds a fresh audio engine. Called after the microphone is open (see startMic) and for the demo.
+async function createContext() {
+  if (E.ctx) { try { await E.ctx.close(); } catch (e) { /* already closed */ } }
   const Ctx = window.AudioContext || window.webkitAudioContext;
   const ctx = new Ctx({ latencyHint: 'interactive' });
   E.ctx = ctx; E.sr = ctx.sampleRate;
+  ctx.onstatechange = () => { if (ctx === E.ctx) render(); };
   const size = 1 << 18;
   E.ring = new Float32Array(size); E.mask = size - 1;
+  E.total = 0; E.subAcc = 0; E.subN = 0; E.hist = []; E.onset = -1; E.lastOnsetAt = -1e12; E.handledOnset = -2;
   E.mix = ctx.createGain();
   const sink = ctx.createGain(); sink.gain.value = 0; sink.connect(ctx.destination);
   try {
@@ -411,7 +427,38 @@ async function ensureContext() {
     E.mix.connect(sp); sp.connect(sink);
   }
   configure();
-  setInterval(tick, TICK);
+  if (!E.ticker) E.ticker = setInterval(tick, TICK);
+  if (ctx.state !== 'running') { try { await ctx.resume(); } catch (e) { /* resumed on the next tap */ } }
+}
+async function ensureContext() {
+  if (E.ctx && E.ctx.state !== 'closed') { resumeAudio(); return; }
+  await createContext();
+}
+// iOS pauses ("interrupted"/"suspended") audio after calls, Siri or app switches; resume on the next tap or return.
+function resumeAudio() {
+  if (E.ctx && E.ctx.state !== 'running' && E.ctx.state !== 'closed') E.ctx.resume().then(render, () => {});
+}
+// What stops the tuner from hearing anything, if anything.
+function audioProblem() {
+  if (!E.ctx || E.ctx.state === 'closed') return null;
+  if (E.ctx.state !== 'running') return 'paused';
+  if (E.live && performance.now() - E.micStartedAt > 3000 && E.lastSoundAt < E.micStartedAt) return 'silent';
+  return null;
+}
+function checkHealth() {
+  const err = $('errMsg');
+  if (audioProblem() === 'silent') {
+    err.textContent = 'The microphone is on but sends only silence. Stop and start the microphone; if that doesn’t help, close the app fully and open it again.';
+    err.hidden = false; E.healthMsg = true;
+  } else if (E.healthMsg) { err.hidden = true; E.healthMsg = false; }
+}
+async function keepAwake() {
+  try {
+    if ('wakeLock' in navigator && document.visibilityState === 'visible' && !E.wake) {
+      E.wake = await navigator.wakeLock.request('screen');
+      E.wake.addEventListener('release', () => { E.wake = null; });
+    }
+  } catch (e) { /* not offered here: the screen may dim while tuning */ }
 }
 
 function pushBlock(buf) {
@@ -434,6 +481,7 @@ function onSub(ms, end) {
   prev = c ? prev / c : ms;
   if (ms > gate() && ms > 4 * prev && end - E.lastOnsetAt > 0.25 * E.sr) { E.onset = end - 512; E.lastOnsetAt = end; }
   h.push(ms); if (h.length > 40) h.shift();
+  if (ms > 0) E.lastSoundAt = performance.now();
   // Exact digital silence (no input yet, a muted stream) says nothing about the room's noise level.
   if (ms > 1e-11) { if (ms < E.noise) E.noise = ms; else E.noise *= 1.002; }
 }
@@ -444,6 +492,7 @@ function getLast(n) {
 }
 
 function tick() {
+  checkHealth();
   if (!E.ring || E.total < 4096) return;
   const sr = E.sr, now = E.total, cfg = E.cfg;
   const rec = getLast(2048);
@@ -630,6 +679,10 @@ function render() {
     hint = E.live || E.ctx ? 'Listening' : 'Start the microphone or try a demo';
     pill.textContent = E.live ? 'Listening' : E.ctx ? 'Microphone off · demo only' : 'Microphone off';
   }
+  if (audioProblem() === 'paused') {
+    pill.textContent = 'Audio paused · tap anywhere to resume';
+    pill.dataset.live = '0';
+  }
   hintState = stateOf(cents);
   $('roLabel').textContent = label;
   $('roNote').innerHTML = note;
@@ -673,33 +726,58 @@ function setMode(m) {
 }
 
 async function toggleMic() {
+  if (E.live) stopMic(); else await startMic();
+}
+async function startMic() {
   const btn = $('micBtn'), err = $('errMsg');
-  err.hidden = true;
-  if (E.live) {
-    E.stream.getTracks().forEach((t) => t.stop());
-    E.micSrc.disconnect(); E.live = false; E.stream = null;
-    btn.textContent = 'Start microphone'; btn.classList.remove('on');
-    render(); return;
-  }
+  err.hidden = true; E.healthMsg = false;
   if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
-    err.textContent = 'This browser can’t use the microphone here. Open the page in Chrome or Edge, or serve it from http://localhost.';
+    err.textContent = 'This browser can’t use the microphone here. Open the page over https (or http://localhost) in Safari, Chrome or Edge.';
     err.hidden = false; return;
   }
   try {
-    await ensureContext();
+    // Open the microphone before building the audio engine: on iOS, above all in home screen apps,
+    // an AudioContext created before capture starts can stay paused or receive only silence.
     const stream = await navigator.mediaDevices.getUserMedia({ audio: { echoCancellation: false, noiseSuppression: false, autoGainControl: false } });
+    await createContext();
     E.stream = stream;
     E.micSrc = E.ctx.createMediaStreamSource(stream);
     E.micSrc.connect(E.mix);
-    E.live = true; E.noise = 1e-6;
+    // iOS ends capture when the app goes to the background or another app takes the microphone.
+    stream.getAudioTracks().forEach((t) => t.addEventListener('ended', () => { if (E.stream === stream) micEnded(); }));
+    E.live = true; E.noise = 1e-6; E.micStartedAt = performance.now();
     btn.textContent = 'Stop microphone'; btn.classList.add('on');
+    keepAwake();
   } catch (e) {
-    err.textContent = e && e.name === 'NotAllowedError'
-      ? 'Microphone access was blocked. Allow it from the icon in the address bar, then try again.'
-      : 'No microphone could be opened (' + (e && e.name || 'error') + '). Check that one is connected.';
+    const name = (e && e.name) || 'error';
+    err.textContent = name === 'NotAllowedError'
+      ? 'Microphone access was blocked. Allow the microphone for this site in the browser’s settings, then try again.'
+      : name === 'NotReadableError'
+        ? 'The microphone is in use by another app. Close that app, then try again.'
+        : 'No microphone could be opened (' + name + '). Check that one is connected.';
     err.hidden = false;
   }
   render();
+}
+function stopMic() {
+  if (E.stream) E.stream.getTracks().forEach((t) => t.stop());
+  if (E.micSrc) E.micSrc.disconnect();
+  E.live = false; E.stream = null; E.micSrc = null;
+  if (E.wake) { E.wake.release().catch(() => {}); E.wake = null; }
+  const btn = $('micBtn');
+  btn.textContent = 'Start microphone'; btn.classList.remove('on');
+  render();
+}
+function micEnded() {
+  stopMic();
+  if (document.visibilityState === 'visible') startMic(); else E.restartOnShow = true;
+}
+function onVisibility() {
+  if (document.visibilityState !== 'visible') return;
+  resumeAudio();
+  const ended = E.live && E.stream && E.stream.getAudioTracks().every((t) => t.readyState === 'ended');
+  if (E.restartOnShow || ended) { E.restartOnShow = false; stopMic(); startMic(); }
+  else if (E.live) keepAwake();
 }
 
 async function playDemo(kind) {
@@ -812,6 +890,12 @@ function wire() {
   $('edDelete').addEventListener('click', () => {
     customs = customs.filter((c) => c.id !== ed.id); saveCustoms(); $('editor').close(); selectTuning('std');
   });
+  document.addEventListener('pointerdown', resumeAudio, true);
+  document.addEventListener('visibilitychange', onVisibility);
+  // Offline support and app install (needs https or localhost).
+  if ('serviceWorker' in navigator && (location.protocol === 'https:' || ['localhost', '127.0.0.1'].includes(location.hostname))) {
+    navigator.serviceWorker.register('sw.js').catch(() => { /* runs fine without it */ });
+  }
   configure();
   requestAnimationFrame(animate);
 }

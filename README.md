@@ -4,6 +4,8 @@ A browser guitar tuner that reads all strings from one strum and switches to sin
 
 **Open it:** https://mturnhout.github.io/Strumtune/ (allow the microphone when the browser asks).
 
+**Install it on a phone:** on iPhone, Safari › Share › Add to Home Screen; on Android, Chrome › ⋮ › Add to Home screen / Install app. It then opens full screen and also works offline. If audio stops after a call or an app switch, tap anywhere to resume.
+
 ## Run locally
 
 Open `index.html` in Chrome or Edge (keep `dsp.js` next to it) and click **Start microphone**. If the browser refuses the microphone on a local file, serve the folder:
@@ -26,6 +28,8 @@ and open http://localhost:8000. **Demo strum** and **Demo single string** play a
 | File | Purpose |
 |---|---|
 | `index.html` | The app: UI, audio input (AudioWorklet), onset detection, mode logic, tuning editor |
+| `manifest.webmanifest`, `icons/` | Home screen / install metadata and icons |
+| `sw.js` | Service worker: offline use, network first |
 | `dsp.js` | Signal processing: FFT, peak picking, tuning plan, polyphonic and monophonic analysis, synthesis for the demo and tests |
 | `tests/synthetic.js` | Accuracy test on synthetic strums and plucks across several tunings |
 | `tests/replay.js` | Replays a recording through a copy of the app's live engine (needs ffmpeg) |
