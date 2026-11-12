@@ -1,0 +1,7 @@
+# recordings and decoded audio used for testing
+*.m4a
+*.wav
+*.f32
+node_modules/
+.DS_Store
+Thumbs.db
