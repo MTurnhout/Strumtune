@@ -60,7 +60,8 @@ body {
   padding-top: max(18px, env(safe-area-inset-top, 0px));
   padding-bottom: max(40px, env(safe-area-inset-bottom, 0px));
 }
-.wrap { max-width: 1040px; margin: 0 auto; display: grid; gap: 16px; }
+.wrap { max-width: 1040px; margin: 0 auto; display: grid; grid-template-columns: minmax(0, 1fr); gap: 16px; }
+.wrap > * { min-width: 0; }
 button, select, input { font: inherit; color: inherit; }
 button { cursor: pointer; }
 :focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
@@ -71,6 +72,10 @@ button { cursor: pointer; }
 .brand svg { width: 28px; height: 28px; color: var(--accent); }
 .controls { display: flex; flex-wrap: wrap; align-items: center; gap: 10px; }
 .field { display: flex; align-items: center; gap: 6px; color: var(--muted); font-size: 13px; }
+/* A long tuning name must not widen the page on a phone: the list shrinks and cuts the name instead. */
+.controls { min-width: 0; max-width: 100%; }
+.field:has(#tuningSel) { min-width: 0; max-width: 100%; }
+#tuningSel { min-width: 0; max-width: 100%; text-overflow: ellipsis; }
 .field select, .field input {
   background: var(--surface); border: 1px solid var(--line); border-radius: 8px; padding: 7px 9px; color: var(--ink);
 }
