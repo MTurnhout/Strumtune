@@ -17,19 +17,22 @@ const nextPow2 = (v) => { let n = 1; while (n < v) n <<= 1; return n; };
 const cfg = { fmax, fmin: Math.max(22, lo * 0.7), minF: Math.max(22, lo * 0.6), maxF: hi * 1.7, monoM: nextPow2(sr * (lo < 60 ? 0.17 : 0.085)) };
 cfg.refineM = cfg.monoM * 2;
 const plan = D.prepareTuning(targets, { fmax });
-const Npoly = sr > 50000 ? 131072 : 65536;
+// Same as index.html: onset blocks of ~11 ms and a ~1.4 s strum window at any sample rate.
+const SUB = 512 * Math.max(1, Math.round(sr / 48000));
+const Npoly = nextPow2(sr * 1.3);
+const RING = Math.max(1 << 19, 2 * Npoly);
 const spec = new D.Spectrum(sr, Npoly), monoSpec = new D.Spectrum(sr, cfg.refineM * 4), mono = new D.MonoDetector();
-const E = { ring: new Float32Array(1 << 19), mask: (1 << 19) - 1, total: 0, subAcc: 0, subN: 0, hist: [], noise: 1e-6, onset: -1, lastOnsetAt: -1e12, handledOnset: -2, onsetMode: null, lastDecided: null, monoHist: [] };
+const E = { ring: new Float32Array(RING), mask: RING - 1, total: 0, subAcc: 0, subN: 0, hist: [], noise: 1e-6, onset: -1, lastOnsetAt: -1e12, handledOnset: -2, onsetMode: null, lastDecided: null, monoHist: [] };
 const gate = () => Math.max(E.noise * 10, 2e-8);
 function onSub(ms, end) {
   const h = E.hist; let prev = 0, c = 0;
   for (let i = Math.max(0, h.length - 10); i < h.length - 1; i++) { prev += h[i]; c++; }
   prev = c ? prev / c : ms;
-  if (ms > gate() && ms > 4 * prev && end - E.lastOnsetAt > 0.25 * sr) { E.onset = end - 512; E.lastOnsetAt = end; console.log(`-- onset at ${(E.onset / sr).toFixed(2)}s`); }
+  if (ms > gate() && ms > 4 * prev && end - E.lastOnsetAt > 0.25 * sr) { E.onset = end - SUB; E.lastOnsetAt = end; console.log(`-- onset at ${(E.onset / sr).toFixed(2)}s`); }
   h.push(ms); if (h.length > 40) h.shift();
   if (ms > 1e-11) { if (ms < E.noise) E.noise = ms; else E.noise *= 1.002; }
 }
-function push(buf) { for (let k = 0; k < buf.length; k++) { const v = buf[k]; E.ring[(E.total + k) & E.mask] = v; E.subAcc += v * v; if (++E.subN === 512) { onSub(E.subAcc / 512, E.total + k + 1); E.subAcc = 0; E.subN = 0; } } E.total += buf.length; }
+function push(buf) { for (let k = 0; k < buf.length; k++) { const v = buf[k]; E.ring[(E.total + k) & E.mask] = v; E.subAcc += v * v; if (++E.subN === SUB) { onSub(E.subAcc / SUB, E.total + k + 1); E.subAcc = 0; E.subN = 0; } } E.total += buf.length; }
 function getLast(n) { const o = new Float32Array(n), s = E.total - n; for (let i = 0; i < n; i++) o[i] = E.ring[(s + i) & E.mask]; return o; }
 const tickN = Math.round(0.08 * sr); let nextTick = tickN;
 const verbose = process.env.V;

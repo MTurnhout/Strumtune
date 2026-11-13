@@ -115,6 +115,7 @@ button { cursor: pointer; }
 .ro-meter[data-state="near"] .needle, .ro-meter[data-state="near"] .needle-head { stroke: var(--near); fill: var(--near); }
 .ro-meter[data-state="off"] .needle, .ro-meter[data-state="off"] .needle-head { stroke: var(--off); fill: var(--off); }
 .ro-meter[data-state="none"] .needle, .ro-meter[data-state="none"] .needle-head { opacity: 0; }
+.readout[data-held="1"] .ro-note, .readout[data-held="1"] .ro-cents, .readout[data-held="1"] .ro-hint, .readout[data-held="1"] svg #needle { opacity: 0.5; }
 .ro-line { display: flex; justify-content: space-between; align-items: baseline; gap: 12px; flex-wrap: wrap; }
 .ro-cents { font: 600 34px/1 var(--font-data); font-variant-numeric: tabular-nums; }
 .ro-hint { font: 600 20px/1.2 var(--font-display); letter-spacing: 0.02em; color: var(--muted); text-align: right; }
@@ -229,7 +230,7 @@ dialog::backdrop { background: rgb(0 0 0 / 0.45); }
     <div class="level" aria-hidden="true">Input <div class="levelbar"><i id="levelFill"></i></div></div>
   </section>
 
-  <section class="readout" aria-live="polite">
+  <section class="readout" id="readout" aria-live="polite">
     <div>
       <div class="ro-label" id="roLabel">Strum all strings, or pluck one</div>
       <div class="ro-note" id="roNote">E<sub>2</sub></div>
@@ -358,11 +359,11 @@ const stringNo = (i, n) => n - i;
 const TICK = 80;
 const E = {
   ctx: null, mix: null, sr: 48000, stream: null, micSrc: null,
-  ring: null, mask: 0, total: 0, subAcc: 0, subN: 0, hist: [], noise: 1e-6, onset: -1, lastOnsetAt: -1e12, handledOnset: -2,
+  ring: null, mask: 0, sub: 512, total: 0, subAcc: 0, subN: 0, hist: [], noise: 1e-6, onset: -1, lastOnsetAt: -1e12, handledOnset: -2,
   spec: null, monoSpec: null, mono: new D.MonoDetector(), Npoly: 65536,
   plan: null, targets: [], cfg: null,
   onsetMode: null, lastDecided: null, mode: null, monoHist: [], silentMs: 0, live: false,
-  readings: [], single: null, strumInfo: null, demoTruth: null,
+  readings: [], single: null, strumInfo: null, demoTruth: null, held: null,
   ticker: null, wake: null, micStartedAt: 0, lastSoundAt: 0, healthMsg: false, restartOnShow: false,
 };
 
@@ -378,17 +379,20 @@ function configure() {
   };
   E.cfg.refineM = E.cfg.monoM * 2;
   E.plan = D.prepareTuning(E.targets, { fmax });
-  E.Npoly = E.sr > 50000 ? 131072 : 65536;
+  E.Npoly = polyLen(E.sr);
   if (!E.spec || E.spec.N !== E.Npoly || E.spec.sr !== E.sr) E.spec = new D.Spectrum(E.sr, E.Npoly);
   const mN = E.cfg.refineM * 4;
   if (!E.monoSpec || E.monoSpec.N !== mN || E.monoSpec.sr !== E.sr) E.monoSpec = new D.Spectrum(E.sr, mN);
   E.readings = E.targets.map(() => null);
-  E.single = null; E.strumInfo = null; E.demoTruth = null;
+  E.single = null; E.strumInfo = null; E.demoTruth = null; E.held = null;
   if (UI.locked != null && UI.locked >= E.targets.length) UI.locked = null;
   buildCards();
   render();
 }
 function nextPow2(x) { let n = 1; while (n < x) n <<= 1; return n; }
+// 512 at 44.1/48 kHz, 1024 at 88.2/96 kHz, 2048 at 176.4/192 kHz. Keep in step with tests/replay.js.
+const subLen = (sr) => 512 * Math.max(1, Math.round(sr / 48000));
+const polyLen = (sr) => nextPow2(sr * 1.3); // 65 536 / 131 072 / 262 144 samples
 
 const WORKLET = `class StrumtuneTap extends AudioWorkletProcessor {
   constructor() { super(); this.b = new Float32Array(1024); this.i = 0; }
@@ -410,7 +414,9 @@ async function createContext() {
   const ctx = new Ctx({ latencyHint: 'interactive' });
   E.ctx = ctx; E.sr = ctx.sampleRate;
   ctx.onstatechange = () => { if (ctx === E.ctx) render(); };
-  const size = 1 << 18;
+  // Onset blocks of about 11 ms and a strum window of about 1.4 s at any sample rate (44.1 to 192 kHz).
+  E.sub = subLen(E.sr); E.Npoly = polyLen(E.sr);
+  const size = Math.max(1 << 18, 2 * E.Npoly);
   E.ring = new Float32Array(size); E.mask = size - 1;
   E.total = 0; E.subAcc = 0; E.subN = 0; E.hist = []; E.onset = -1; E.lastOnsetAt = -1e12; E.handledOnset = -2;
   E.mix = ctx.createGain();
@@ -467,7 +473,7 @@ function pushBlock(buf) {
     const v = buf[k];
     ring[(E.total + k) & mask] = v;
     E.subAcc += v * v;
-    if (++E.subN === 512) { onSub(E.subAcc / 512, E.total + k + 1); E.subAcc = 0; E.subN = 0; }
+    if (++E.subN === E.sub) { onSub(E.subAcc / E.sub, E.total + k + 1); E.subAcc = 0; E.subN = 0; }
   }
   E.total += buf.length;
 }
@@ -479,7 +485,7 @@ function onSub(ms, end) {
   let prev = 0, c = 0;
   for (let i = Math.max(0, h.length - 10); i < h.length - 1; i++) { prev += h[i]; c++; }
   prev = c ? prev / c : ms;
-  if (ms > gate() && ms > 4 * prev && end - E.lastOnsetAt > 0.25 * E.sr) { E.onset = end - 512; E.lastOnsetAt = end; }
+  if (ms > gate() && ms > 4 * prev && end - E.lastOnsetAt > 0.25 * E.sr) { E.onset = end - E.sub; E.lastOnsetAt = end; }
   h.push(ms); if (h.length > 40) h.shift();
   if (ms > 0) E.lastSoundAt = performance.now();
   // Exact digital silence (no input yet, a muted stream) says nothing about the room's noise level.
@@ -544,6 +550,9 @@ function tick() {
   if (mode === 'strum' && poly) applyStrum(poly, L);
   if (mode === 'single' && mono && mono.freq && mono.clarity > 0.75) applySingle(mono.freq);
   E.mode = mode;
+  // The last reading stays on screen (dimmed) after the string fades, until the next one replaces it.
+  if (mode === 'single' && E.single) E.held = 'single';
+  else if (mode === 'strum' && E.strumInfo) E.held = 'strum';
   render();
 }
 
@@ -647,9 +656,11 @@ function render() {
   const pill = $('statusPill');
   pill.dataset.live = E.live ? '1' : '0';
   let label, note, sub, cents = null, hint, hintState;
-  if (E.mode === 'single' && E.single) {
+  const held = !E.mode && !!E.held;
+  const view = E.mode || E.held;
+  if (view === 'single' && E.single) {
     const s = E.single, tgt = E.targets[s.i];
-    label = `Single string · string ${stringNo(s.i, n)}${UI.locked === s.i ? ' (locked)' : ''}`;
+    label = `${held ? 'Last reading' : 'Single string'} · string ${stringNo(s.i, n)}${UI.locked === s.i ? ' (locked)' : ''}`;
     note = noteHTML(t.notes[s.i]);
     sub = `${s.f.toFixed(2)} Hz · target ${tgt.toFixed(2)} Hz`;
     cents = s.cents;
@@ -657,13 +668,15 @@ function render() {
       const heard = Math.round(D.freqToMidi(s.f, UI.a4));
       hint = `Hearing ${D.midiName(heard).replace('#', '♯')} · tune ${cents < 0 ? 'up' : 'down'}`;
     } else hint = Math.abs(cents) <= 2 ? 'In tune' : cents < 0 ? 'Flat · tune up' : 'Sharp · tune down';
-    pill.textContent = `Single string: ${noteParts(t.notes[s.i]).name}${noteParts(t.notes[s.i]).oct}`;
-  } else if (E.mode === 'strum' && E.strumInfo) {
-    const heard = E.readings.map((r, i) => ({ r, i })).filter((x) => x.r && !x.r.missing && now - x.r.t < 2500);
+    pill.textContent = held ? (E.live ? 'Listening' : 'Microphone off') : `Single string: ${noteParts(t.notes[s.i]).name}${noteParts(t.notes[s.i]).oct}`;
+  } else if (view === 'strum' && E.strumInfo) {
+    // Live: readings from the last 2.5 s. Held: the readings of the last strum.
+    const since = held ? E.strumInfo.t - 2500 : now - 2500;
+    const heard = E.readings.map((r, i) => ({ r, i })).filter((x) => x.r && !x.r.missing && x.r.t > since && (!held || x.r.src === 'strum'));
     const worst = heard.reduce((a, x) => (!a || Math.abs(x.r.cents) > Math.abs(a.r.cents) ? x : a), null);
     const inTune = heard.filter((x) => Math.abs(x.r.cents) <= 2).length;
-    label = `Strum · ${heard.length} of ${n} strings heard${E.strumInfo.settling ? ' · settling' : ''}`;
-    pill.textContent = 'Strum detected';
+    label = `${held ? 'Last strum' : 'Strum'} · ${heard.length} of ${n} strings heard${E.strumInfo.settling && !held ? ' · settling' : ''}`;
+    pill.textContent = held ? (E.live ? 'Listening' : 'Microphone off') : 'Strum detected';
     if (worst && inTune === heard.length && heard.length === n) {
       note = '✓'; sub = `All ${n} strings within 2 cents`; cents = worst.r.cents; hint = 'In tune';
     } else if (worst) {
@@ -684,6 +697,7 @@ function render() {
     pill.dataset.live = '0';
   }
   hintState = stateOf(cents);
+  $('readout').dataset.held = held ? '1' : '0';
   $('roLabel').textContent = label;
   $('roNote').innerHTML = note;
   $('roSub').textContent = sub;
@@ -738,7 +752,7 @@ async function startMic() {
   try {
     // Open the microphone before building the audio engine: on iOS, above all in home screen apps,
     // an AudioContext created before capture starts can stay paused or receive only silence.
-    const stream = await navigator.mediaDevices.getUserMedia({ audio: { echoCancellation: false, noiseSuppression: false, autoGainControl: false } });
+    const stream = await openMic();
     await createContext();
     E.stream = stream;
     E.micSrc = E.ctx.createMediaStreamSource(stream);
@@ -749,15 +763,40 @@ async function startMic() {
     btn.textContent = 'Stop microphone'; btn.classList.add('on');
     keepAwake();
   } catch (e) {
-    const name = (e && e.name) || 'error';
-    err.textContent = name === 'NotAllowedError'
-      ? 'Microphone access was blocked. Allow the microphone for this site in the browser’s settings, then try again.'
-      : name === 'NotReadableError'
-        ? 'The microphone is in use by another app. Close that app, then try again.'
-        : 'No microphone could be opened (' + name + '). Check that one is connected.';
+    err.textContent = micErrorText(e);
     err.hidden = false;
   }
   render();
+}
+// Asks with the voice processing off (it distorts a guitar's pitch); some devices refuse those settings,
+// so a plain request follows before giving up.
+async function openMic() {
+  const md = navigator.mediaDevices;
+  try {
+    return await md.getUserMedia({ audio: { echoCancellation: false, noiseSuppression: false, autoGainControl: false } });
+  } catch (e) {
+    if (e && e.name === 'NotReadableError') throw e;
+    try { return await md.getUserMedia({ audio: true }); } catch (e2) { throw e && e.name === 'OverconstrainedError' ? e2 : e; }
+  }
+}
+const isStandalone = () => navigator.standalone === true || (window.matchMedia && matchMedia('(display-mode: standalone)').matches);
+const isIOS = () => /iPhone|iPad|iPod/.test(navigator.userAgent) || (navigator.platform === 'MacIntel' && navigator.maxTouchPoints > 1);
+function micErrorText(e) {
+  const name = (e && e.name) || 'Error';
+  const detail = ` (${name}${e && e.message ? ': ' + e.message : ''})`;
+  if (name === 'NotAllowedError' || name === 'SecurityError') {
+    if (isStandalone() && isIOS()) {
+      return 'The home screen app was refused the microphone. It has its own permission, apart from Safari: tap Start microphone again and choose Allow. ' +
+        'If no question appears, check that Settings › Apps › Safari › Microphone is set to Ask or Allow, then remove Strumtune from the home screen and add it again from Safari. ' +
+        'The tuner works the same in a Safari tab.' + detail;
+    }
+    if (isStandalone()) {
+      return 'The installed app was refused the microphone. Allow it under the app’s settings (long-press the icon › App info › Permissions › Microphone), then try again.' + detail;
+    }
+    return 'Microphone access was blocked. Allow the microphone for this site in the browser’s settings, then try again.' + detail;
+  }
+  if (name === 'NotReadableError') return 'The microphone is in use by another app. Close that app, then try again.' + detail;
+  return 'No microphone could be opened. Check that one is connected.' + detail;
 }
 function stopMic() {
   if (E.stream) E.stream.getTracks().forEach((t) => t.stop());

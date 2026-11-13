@@ -4,7 +4,7 @@ A browser guitar tuner that reads all strings from one strum and switches to sin
 
 **Open it:** https://mturnhout.github.io/Strumtune/ (allow the microphone when the browser asks).
 
-**Install it on a phone:** on iPhone, Safari › Share › Add to Home Screen; on Android, Chrome › ⋮ › Add to Home screen / Install app. It then opens full screen and also works offline. If audio stops after a call or an app switch, tap anywhere to resume.
+**Install it on a phone:** on iPhone, Safari › Share › Add to Home Screen; on Android, Chrome › ⋮ › Add to Home screen / Install app. It then opens full screen and also works offline. If audio stops after a call or an app switch, tap anywhere to resume. On iPhone the home screen app asks for the microphone separately from Safari; if it is refused without asking, check that Settings › Apps › Safari › Microphone is set to Ask or Allow, then remove the app and add it again.
 
 ## Run locally
 
@@ -18,9 +18,10 @@ and open http://localhost:8000. **Demo strum** and **Demo single string** play a
 
 ## How it works
 
-- **Strum (polyphonic):** a Hann-windowed FFT over up to ~1.4 s (65 536 samples at 44.1/48 kHz, 131 072 at 88.2/96 kHz) since the last onset. For each string, the tuner looks for peaks near its harmonics within ±60 cents. Harmonics no other string can reach are measured first; shared harmonics are explained away using the other strings' estimates. A string counts as played only with unexplained evidence among its first three harmonics. Strings that can't be separated from another string's overtone are shown as "≈ shared".
+- **Strum (polyphonic):** a Hann-windowed FFT over up to ~1.4 s (65 536 samples at 44.1/48 kHz, 131 072 at 88.2/96 kHz, 262 144 at 176.4/192 kHz) since the last onset. For each string, the tuner looks for peaks near its harmonics within ±60 cents. Harmonics no other string can reach are measured first; shared harmonics are explained away using the other strings' estimates. A string counts as played only with unexplained evidence among its first three harmonics. Strings that can't be separated from another string's overtone are shown as "≈ shared".
 - **Single string (monophonic):** McLeod pitch method (NSDF via FFT) for a fast rough pitch, refined from the spectral peaks of the 1st and 2nd harmonics to avoid the sharp bias that inharmonic upper partials give autocorrelation.
 - **Auto mode:** per onset, three or more strings within 20 dB of the loudest in the first 0.5 s means a strum; otherwise a clear single pitch means single-string mode, on the nearest string (or the string you tapped to lock).
+- **Held reading:** when the string fades, the last reading stays on screen, dimmed, until the next note replaces it.
 - **Real-world robustness:** spectral peaks must be 10 dB above the quiet-room level (removes mains hum), a string can't claim a harmonic more than 20 dB louder than its own lower harmonics (sympathetically ringing strings don't steal the plucked string), and quieter strings are not counted as played.
 
 ## Files
